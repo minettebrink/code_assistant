@@ -1,23 +1,31 @@
-# --- Stage 1: Model Downloader and Splitter ---
-FROM python:3.11-slim as downloader
+# First stage: Download model files
+FROM python:3.11-slim as model_downloader
 
-LABEL stage="model-downloader"
-
-WORKDIR /app
-
-# Install necessary libraries for downloading and splitting
-RUN pip install --no-cache-dir huggingface_hub>=0.15.1 torch>=2.0.0
-
-# Copy the download script
-COPY backend/download_model.py /app/download_model.py
+# Install huggingface_hub and diffusers with specific versions
+RUN pip3 install --no-cache-dir huggingface_hub
 
 # Define model repo ID (can be overridden at build time)
 ARG MODEL_REPO_ID="all-hands/openhands-lm-32b-v0.1"
 ENV MODEL_REPO_ID=${MODEL_REPO_ID}
 
-# Run the download script - downloads to /model_cache
-# Exit with error if the script fails
-RUN python /app/download_model.py || (echo "Model download script failed!" && exit 1)
+# Copy the download script
+COPY download_model.py /download_model.py
+
+# Run the Python script with increased timeout and retries
+RUN python3 /download_model.py || (echo "Model download failed" && exit 1)
+
+# Second stage: Main application
+# Use Python 3.11 slim image as base
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first to leverage Docker cache
+COPY requirements.txt .
+
+# Install dependencies (removed curl since it's no longer needed for healthcheck)
+RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Split large files ---
 # Create directories for chunks and to record original paths
