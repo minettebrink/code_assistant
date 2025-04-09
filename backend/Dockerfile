@@ -8,6 +8,9 @@ WORKDIR /app
 # Install necessary libraries for downloading and splitting
 RUN pip install --no-cache-dir huggingface_hub>=0.15.1 torch>=2.0.0
 
+# Create the model cache directory
+RUN mkdir -p /model_cache
+
 # Copy the download script
 COPY download.py /app/download_model.py
 
@@ -18,6 +21,9 @@ ENV MODEL_REPO_ID=${MODEL_REPO_ID}
 # Run the download script - downloads to /model_cache
 # Exit with error if the script fails
 RUN python /app/download_model.py || (echo "Model download script failed!" && exit 1)
+
+# Verify download
+RUN ls -lh /model_cache
 
 # --- Split large files ---
 # Create directories for chunks and to record original paths
