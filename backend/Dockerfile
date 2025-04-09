@@ -1,31 +1,23 @@
-# First stage: Download model files
-FROM python:3.11-slim as model_downloader
+# --- Stage 1: Model Downloader and Splitter ---
+FROM python:3.11-slim as downloader
 
-# Install huggingface_hub and diffusers with specific versions
-RUN pip3 install --no-cache-dir huggingface_hub
+LABEL stage="model-downloader"
+
+WORKDIR /app
+
+# Install necessary libraries for downloading and splitting
+RUN pip install --no-cache-dir huggingface_hub>=0.15.1 torch>=2.0.0
+
+# Copy the download script
+COPY download.py /app/download_model.py
 
 # Define model repo ID (can be overridden at build time)
 ARG MODEL_REPO_ID="all-hands/openhands-lm-32b-v0.1"
 ENV MODEL_REPO_ID=${MODEL_REPO_ID}
 
-# Copy the download script
-COPY download_model.py /download_model.py
-
-# Run the Python script with increased timeout and retries
-RUN python3 /download_model.py || (echo "Model download failed" && exit 1)
-
-# Second stage: Main application
-# Use Python 3.11 slim image as base
-FROM python:3.11-slim
-
-# Set working directory
-WORKDIR /app
-
-# Copy requirements first to leverage Docker cache
-COPY requirements.txt .
-
-# Install dependencies (removed curl since it's no longer needed for healthcheck)
-RUN pip install --no-cache-dir -r requirements.txt
+# Run the download script - downloads to /model_cache
+# Exit with error if the script fails
+RUN python /app/download_model.py || (echo "Model download script failed!" && exit 1)
 
 # --- Split large files ---
 # Create directories for chunks and to record original paths
@@ -61,17 +53,17 @@ ENV PYTHONUNBUFFERED=1
 RUN useradd -m -u 1001 appuser
 
 # Copy requirements file first for caching
-COPY backend/requirements.txt .
+COPY requirments.txt .
 
 # Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirments.txt
 
 # Create directories and set initial ownership
 RUN mkdir -p /model_cache /app/model_chunks && \
     chown -R appuser:appuser /app /model_cache
 
 # Copy application code
-COPY backend/ /app/backend/
+COPY . /app/backend/
 
 # Copy necessary files from the downloader stage
 COPY --from=downloader /model_cache /model_cache
