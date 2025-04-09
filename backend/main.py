@@ -5,6 +5,11 @@ import os
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import snapshot_download
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 MODEL_REPO_ID = "all-hands/openhands-lm-32b-v0.1"
@@ -32,45 +37,75 @@ app.add_middleware(
 )
 
 # --- Model Loading ---
-print(f"Downloading model repository: {MODEL_REPO_ID}...")
-# Download the model repository snapshot
-local_model_dir = snapshot_download(repo_id=MODEL_REPO_ID)
-print(f"Model repository downloaded to: {local_model_dir}")
+# Paths
+local_model_dir = "/model_cache"
 
-print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(local_model_dir)
-print("Tokenizer loaded.")
+# Initialize global variables
+model = None
+tokenizer = None
 
-print("Loading model...")
-model_load_kwargs = {"torch_dtype": MODEL_DTYPE}
-if USE_ACCELERATE:
-    # device_map="auto" distributes model layers across available devices (GPUs, CPU)
-    # Requires the `accelerate` library: pip install accelerate
-    model_load_kwargs["device_map"] = "auto"
+# Function to load the model
+def load_model():
+    global model, tokenizer
+    try:
+        # Check if model files already exist in cache
+        model_config_path = os.path.join(local_model_dir, "config.json")
+        if not os.path.exists(model_config_path):
+            logger.info(f"Model not found in cache. Downloading from {MODEL_REPO_ID}...")
+            try:
+                # Try with higher timeout settings and retries
+                snapshot_download(
+                    repo_id=MODEL_REPO_ID,
+                    local_dir=local_model_dir,
+                    local_dir_use_symlinks=False,
+                    resume_download=True,
+                    max_workers=1,  # Try with a single worker to avoid network race conditions
+                )
+                logger.info(f"Model downloaded to: {local_model_dir}")
+            except Exception as download_error:
+                logger.error(f"Failed to download model: {download_error}")
+                # Check if Docker's DNS is working
+                try:
+                    import socket
+                    logger.info(f"DNS check - IP for huggingface.co: {socket.gethostbyname('huggingface.co')}")
+                except Exception as dns_error:
+                    logger.error(f"DNS resolution failed: {dns_error}")
+                raise
+        else:
+            logger.info(f"Using existing model from: {local_model_dir}")
 
-try:
-    model = AutoModelForCausalLM.from_pretrained(
-        local_model_dir,
-        **model_load_kwargs
-    )
-    print("Model loaded successfully.")
-    if not USE_ACCELERATE:
-         # If not using accelerate, manually move to GPU if available
-         if torch.cuda.is_available():
-             print("Moving model to GPU...")
-             model.to("cuda")
-             print("Model moved to GPU.")
-         else:
-             print("No GPU detected, using CPU.")
+        # Load tokenizer
+        logger.info("Loading tokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(local_model_dir)
+        logger.info("Tokenizer loaded.")
 
-except Exception as e:
-    print(f"Error loading model: {e}")
-    # Depending on your setup, you might want the app to fail hard here
-    # or continue without the model loaded (e.g., return errors on endpoints)
-    model = None
-    tokenizer = None
-    # raise RuntimeError(f"Failed to load model: {e}")
+        # Load model
+        logger.info("Loading model...")
+        model_load_kwargs = {"torch_dtype": MODEL_DTYPE}
+        if USE_ACCELERATE:
+            model_load_kwargs["device_map"] = "auto"
 
+        model = AutoModelForCausalLM.from_pretrained(
+            local_model_dir,
+            **model_load_kwargs
+        )
+        logger.info("Model loaded successfully.")
+        if not USE_ACCELERATE and torch.cuda.is_available():
+            logger.info("Moving model to GPU...")
+            model.to("cuda")
+            logger.info("Model moved to GPU.")
+        elif not USE_ACCELERATE:
+            logger.info("No GPU detected, using CPU.")
+
+        return True
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        return False
+
+# Load model on startup
+@app.on_event("startup")
+async def startup_event():
+    load_model()
 
 # --- API Endpoints ---
 class ChatMessage(BaseModel):
@@ -86,16 +121,17 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    # Basic health check, could be expanded later
     return {"status": "healthy", "model_loaded": model is not None}
 
 @app.post("/chat")
 async def chat(request: ChatMessage):
     if not model or not tokenizer:
-        raise HTTPException(status_code=503, detail="Model is not available.")
+        # Try loading the model if it's not loaded yet
+        if not load_model():
+            raise HTTPException(status_code=503, detail="Model is not available and could not be loaded.")
 
     try:
-        print(f"Received message: {request.message}")
+        logger.info(f"Received message: {request.message}")
         # Prepare input for the model
         inputs = tokenizer(request.message, return_tensors="pt")
 
@@ -107,7 +143,7 @@ async def chat(request: ChatMessage):
              inputs = {k: v.to("cpu") for k, v in inputs.items()}
         # If using accelerate and device_map="auto", inputs are automatically handled
 
-        print("Generating response...")
+        logger.info("Generating response...")
         # Generate response
         # Ensure generation happens without tracking gradients
         with torch.no_grad():
@@ -128,14 +164,13 @@ async def chat(request: ChatMessage):
         if reply_text.startswith(request.message):
              reply_text = reply_text[len(request.message):].strip()
 
-
-        print(f"Generated reply: {reply_text}")
+        logger.info(f"Generated reply: {reply_text}")
         return {"reply": reply_text}
 
     except Exception as e:
-        print(f"Error during chat generation: {str(e)}")
+        logger.error(f"Error during chat generation: {str(e)}")
         # Consider logging the full traceback here
-        # import traceback
-        # traceback.print_exc()
+        import traceback
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
 
