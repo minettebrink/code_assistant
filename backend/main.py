@@ -35,6 +35,7 @@ def load_model():
     global model, tokenizer
     try:
         model_config_path = os.path.join(local_model_dir, "config.json")
+        
         if not os.path.exists(model_config_path):
             try:
                 snapshot_download(
@@ -67,19 +68,12 @@ def load_model():
     except Exception as e:
         return False
 
-@app.on_event("startup")
-async def startup_event():
-    load_model()
-
 
 class ChatMessage(BaseModel):
     message: str
     max_new_tokens: int = 100
     temperature: float = 0.7
    
-@app.get("/")
-async def root():
-    return {"message": f"Welcome to OpenHands API. Model '{MODEL_REPO_ID}' status: {'Loaded' if model else 'Failed to load'}"}
 
 @app.get("/health")
 async def health_check():
