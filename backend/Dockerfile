@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir huggingface_hub
 RUN mkdir -p /model_cache
 
 # Copy just the download script
-COPY backend/download.py /app/download.py
+COPY download.py /app/download.py
 
 # Run the model download script
 RUN cd /app && python download.py
